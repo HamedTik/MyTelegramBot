@@ -1,0 +1,115 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using Telegram.Bot;
+using TikBot.Services;
+using Message = Telegram.Bot.Types.Message;
+
+namespace TikBot.Handlers.PrivateChat
+{
+    public class AppreciationHandler
+    {
+        private readonly StudentService _studentService;
+        private readonly UserService _userService;
+        private const long APPRECIATION_GROUP_CHAT_ID = -4678544514;
+
+        public AppreciationHandler(StudentService studentService, UserService userService)
+        {
+            _studentService = studentService;
+            _userService = userService;
+        }
+
+        public async Task HandleAsync(ITelegramBotClient botClient, Message message, CancellationToken cancellationToken)
+        {
+            var userId = message.From.Id;
+            var chatId = message.Chat.Id;
+
+            // Ask for appreciation
+            var askMessage = await botClient.SendTextMessageAsync(
+                chatId: chatId,
+                text: "اگه از خدمات منتورت راضی بودی، در یک پیام قدردانیت رو بنویس",
+                cancellationToken: cancellationToken
+            );
+
+            // Mark as pending
+            _studentService.StartPendingAction(userId, "Appreciation", askMessage.MessageId);
+        }
+
+        public async Task HandleResponseAsync(ITelegramBotClient botClient, Message message, CancellationToken cancellationToken)
+        {
+            var userId = message.From.Id;
+            var chatId = message.Chat.Id;
+            var messageId = message.MessageId;
+
+            // Check if this is a pending appreciation
+            var pendingMessageId = _studentService.GetPendingActionMessageId(userId, "Appreciation");
+            if (!_studentService.IsPendingAction(userId, "Appreciation", pendingMessageId))
+            {
+                return;
+            }
+
+            // Get student info
+            var student = _studentService.GetStudentInfo(userId);
+            if (student == null || student.GroupId == 0)
+            {
+                await botClient.SendTextMessageAsync(
+                    chatId: chatId,
+                    text: "شما در گروهی ثبت‌نام نکردید. لطفاً در گروه پیشرفت پیام دهید.",
+                    cancellationToken: cancellationToken
+                );
+                return;
+            }
+
+            // Get group info
+            var (groupName, groupLink) = await GetGroupInfoAsync(botClient, student.GroupId, cancellationToken);
+            var mentorId = student.MentorId;
+            var mentorName = _userService.GetMentor(mentorId)?.FullName ?? "منتور ناشناس";
+            var mentorLink = $"tg://user?id={mentorId}";
+
+            // Send confirmation
+            var confirmationMessage = await botClient.SendTextMessageAsync(
+                chatId: chatId,
+                text: "ممنون از قدردانیت!\nپیامت برای دکتر احمدی ارسال شد و به منتور می‌رسه",
+                cancellationToken: cancellationToken
+            );
+
+            // Send to appreciation group
+            var appreciationMessage = $"اسم گروه: [{groupName}]({groupLink})\n" +
+                                     $"اسم منتور: [{mentorName}]({mentorLink})\n" +
+                                     "موضوع: قدردانی از منتور\n" +
+                                     $"دلیل: {message.Text ?? "بدون توضیح"}";
+
+            await botClient.SendTextMessageAsync(
+                chatId: APPRECIATION_GROUP_CHAT_ID,
+                text: appreciationMessage,
+                parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown,
+                cancellationToken: cancellationToken
+            );
+
+            // Delete messages
+            await botClient.DeleteMessageAsync(chatId, pendingMessageId, cancellationToken); // "قدردانیت رو بنویس"
+            await botClient.DeleteMessageAsync(chatId, messageId, cancellationToken); // User message
+            await botClient.DeleteMessageAsync(chatId, confirmationMessage.MessageId, cancellationToken); // Confirmation
+
+            // Clear pending
+            _studentService.CompletePendingAction(userId, "Appreciation", pendingMessageId);
+        }
+
+        private async Task<(string GroupName, string GroupLink)> GetGroupInfoAsync(ITelegramBotClient botClient, long groupId, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var chat = await botClient.GetChatAsync(groupId, cancellationToken);
+                var groupName = chat.Title ?? "گروه بدون نام";
+                var groupLink = chat.InviteLink ?? await botClient.ExportChatInviteLinkAsync(groupId, cancellationToken);
+                return (groupName, groupLink);
+            }
+            catch
+            {
+                return ("گروه بدون نام", "لینک نامشخص");
+            }
+        }
+    }
+}
